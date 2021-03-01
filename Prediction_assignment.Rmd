@@ -1,0 +1,192 @@
+#Pull in packages and saved versions of models
+I pull in the saved versions of the models so I don't have to re-calculate them. 
+```{r}
+setwd("~/Downloads")
+library(AppliedPredictiveModeling)
+library(caret)
+library(gbm)
+model_rf <- readRDS("model_rf.rds")
+model_gbm <- readRDS("model_gbm.rds")
+model_pca <- readRDS("model_pca.rds")
+model_stack <- readRDS("model_stack.rds")
+```
+
+#Read in the data
+I read in the full data set and the 20 case examples. 
+
+```{r}
+data = read.csv("~/Downloads/pml-training.csv")
+test_20 = read.csv("~/Downloads/pml-testing.csv")
+```
+
+
+#Divide the full data set into a training and test set 
+I first separate the full data set into a training and a test set. I use
+an 80%/20% split. I do this step before examining the data to ensure that
+I am not changing the analyses based on the characteristics of the test 
+data.
+```{r}
+set.seed(2021)
+trainIn<-createDataPartition(data$classe, p = 4/5)[[1]]
+training<-data[trainIn,]
+testing<-data[-trainIn,]
+```
+
+
+#Examine data
+I first examine the data to get a better understanding of the structure and the variables in the data. One important issue I notice is that there is a high proportion of observations with missing data for many of the variables. It appears that these variables are missing for all the observations for which new window is equal to no. As such, it is possible that the values for these variables when new window  is equal to 'no' are the same as the values for the all subsequent observations of that window. However, given that this information is not explicitly stated in the description of the data, I decided to take  the data is given and proceed as if the data is truly missing.
+```{r eval=FALSE}
+summary(training)
+str(training)
+```
+
+#Examine missing data
+I use a loop to identify whether the value is missing. For numeric/integer variables the missing values appear as NA and can be identified using the is.na function. For factor variables the missing values are listed as "" and can be identified by seeing whether the value equals "". 
+
+```{r}
+missing<- matrix(NA, nrow = length(training$classe), ncol = length(colnames(training)))
+
+for (i in 1:length(training$classe)) {
+  for (j in 1:length(colnames(training))) {
+    if (is.na(training[i,j]) | training[i,j]=="") {
+      missing[i,j]<-TRUE} else
+      {missing[i,j]<-FALSE}
+  }
+}
+```
+
+I use the missing data matrix to identify the proportion of each variable that are missing. I then only retain variables that have less than 50% missing. I could have potentially used imputation to retain the variables with missing values. However, the percentage missing was greater than 97% and with such a high percentage of missing values I did not feel comfortable using imputation. I create the subset of variables for both the training and the test sets. Importantly, I use the proportion missing created from the training set to identify the variables to retain for the test set. This has to do with ensuring that I keep the test set separate until doing the final predictions. 
+
+```{r}
+prop_missing<-colMeans(missing)
+training_alt<-training[,which(prop_missing<0.5)]
+testing_alt<-testing[,which(prop_missing<0.5)]
+test_20_alt<-test_20[,which(prop_missing<0.5)]
+```
+
+
+#Preprocessing
+I standardized  the numeric variables because I found that the variables had widely different
+values that they took. I first identify the numeric predictors, since you can only standardize numeric predictors. I also exclude variables that are numeric, but that I do not believe are relevant for prediction. Specifically, these are X, raw_timestamp_part_1, raw_timestamp_part_2, cvtd_timestamp, new_window, and num_window. I believe these variables are measuring aspects of when the observation took place and ID variables about the observation. These variables are important for understanding the data, but do not seem pertinent to use as predictors. 
+
+```{r}
+numeric_pred<-sapply(training_alt, is.numeric)
+numeric_pred[c(1,3,4,5,6,7)]<-FALSE
+```
+
+I use the preProcess function to center and scale the numeric variables. I first create the preProcess function using the training data. Then I apply it to the training data. I also apply the function created with the training data to the testing data because I did not want to use information about the test data to inform the model (this would be the case if I created the preprocessing function using the test data). After creating the data sets with the standardized variables, I merge the non-numeric and other variables back with the data. 
+
+```{r}
+train_pre<-preProcess(training_alt[,numeric_pred],method=c("center","scale"))
+training_preprocess<-predict(train_pre,training_alt[,numeric_pred])
+training_final<-cbind(training_preprocess,training_alt[,c(1:7,60)])
+testing_preprocess<-predict(train_pre,testing_alt[,numeric_pred])
+testing_final<-cbind(testing_preprocess,testing_alt[,c(1:7,60)])
+test_20_preprocess<-predict(train_pre,test_20_alt[,numeric_pred])
+test_20_final<-cbind(test_20_preprocess,test_20_alt[,c(1:7,60)])
+```
+
+#Examine correlation
+I examine the degree of correlation between the predictors in the training data. The degree of correlation may inform which modeling approaches may be more appropriate. I find that there are many predictors with correlation of 0.8 or greater. This finding suggests that I may want to incorporate principal components analysis to the high degree of correlation in the data.
+
+```{r}
+M<-abs(cor(training_final[,c(1:52)]))
+diag(M)<-0
+which(M>0.8,arr.ind=T)
+```
+
+#Models
+I decided to run three different models and then use stacking to combine the predictors. The models are 1) random forest, 2) gradient boosting, and 3) multinomial logistic regression with principal components analysis. The first two models are often among the best performing in competitions and I use principal components analysis because of the high degree of correlation I observed earlier. For all three approaches I use K-fold cross-validation with ten folds. Ideally, I would have done repeated K-fold cross-validation, but given the size of the data and the time it takes to run the random forest and gradient boosting models, I decided that K-fold cross-validation with ten folds would be sufficient. Ten folds is a common choice for the number of folds because very high values of K are associated with more variance and very low numbers are associated with more bias. That is, ten folds tends to be judged as balancing the bias-variance tradeoff reasonably well. The value of doing K-fold cross-validation is that it helps to avoid overfitting when training the models. 
+```{r eval=FALSE}
+set.seed(2021)
+model_rf<-train(classe~.,data=training_final[,c(1:52,54,60)],method="rf",trControl=trainControl(method="cv",number=10))
+model_gbm<-train(classe~.,data=training_final[,c(1:52,54,60)],method="gbm",trControl=trainControl(method="cv",number=10))
+model_pca<-train(classe~.,data=training_final[,c(1:52,54,60)],method="multinom",preProcess="pca",trControl=trainControl(method="cv",number=10))
+```
+
+The random forest model found that the optimal value for number of variables available for splitting was 29. The other values evaluated were 2 and 57 (all variables). We see that the performance was good for all three values, but it appears to decrease somewhat when using all variables, which may be a sign that overfitting is occurring when all variables are used. It may be possible to optimize the model further if I tried different values other than 2, 29, and 57. However, given that it appears 29 is working quite well, I don't believe this is necessary. 
+```{r}
+plot(model_rf)
+model_rf
+```
+I also checked the gradient boosting and multinomial logistic/principal components analysis to see if the output is as expected. I don't show the output given the space considerations. The gradient boosting model appeared to perform reasonably well. However, it appeared that only 150 iterations were used. The best performance came with the 150th iteration and it may be possible to improve performance even more with more iterations. However, given that the performance was already quite strong, I did not feel this was necessary. For the multinomial logistic/principal components analysis there were 25 principal components identified. 
+
+```{r eval=FALSE}
+plot(model_gbm)
+model_gbm
+plot(model_pca)
+model_pca
+```
+
+I calculate the predictions from each individual model on both the training data and the test data. The reason I predict for both is that I am interested in how well the predictions perform for the training data and how well they perform for the test data. If the predictions are very good for the training data and poor for the test data, then this may be a sign that I have overfit the training data.
+```{r}
+pred_train_rf<-predict(model_rf,data=training_final)
+pred_train_gbm<-predict(model_gbm,data=training_final)
+pred_train_pca<-predict(model_pca,data=training_final)
+
+pred_test_rf<-predict(model_rf,newdata=testing_final)
+pred_test_gbm<-predict(model_gbm,newdata=testing_final)
+pred_test_pca<-predict(model_pca,newdata=testing_final)
+
+pred_test_20_rf<-predict(model_rf,newdata=test_20_final)
+pred_test_20_gbm<-predict(model_gbm,newdata=test_20_final)
+pred_test_20_pca<-predict(model_pca,newdata=test_20_final)
+```
+
+I put together all the predictions into a data frame along with the outcome both for the training data and the testing data (I don't have the outcome for the 20 test examples).
+```{r}
+pred_train_DF<-data.frame(rf=pred_train_rf,gbm=pred_train_gbm,pca=pred_train_pca,classe=training$classe)
+pred_test_DF<-data.frame(rf=pred_test_rf,gbm=pred_test_gbm,pca=pred_test_pca,classe=testing$classe)
+pred_test_20_DF<-data.frame(rf=pred_test_20_rf,gbm=pred_test_20_gbm,pca=pred_test_20_pca,test_20_final$problem_id)
+```
+
+I train a stacked model using a random forest model with K-fold cross-validation. The predictors are the predicted outcome from the three original models. By stacking, I can hopefully take advantage of the  strengths of each of the three approaches. 
+```{r eval=FALSE}
+set.seed(2021)
+model_stack<-train(classe~.,method="rf",data=pred_train_DF,trControl=trainControl(method="cv",number=10))
+```
+
+I create predictions for the training set, the testing set, and the 
+```{r}
+pred_train_stack<-predict(model_stack,data=pred_train_DF)
+pred_test_stack<-predict(model_stack,newdata=pred_test_DF)
+pred_test_20_stack<-predict(model_stack,newdata=pred_test_20_DF)
+```
+
+#Evaluating predictions
+I first evaluate the model performance for the training data. The random forest and the stacked models both had perfect accuracy. The gradient boosting model was next with 0.9739 and the principal components analysis approach performed worst with an accuracy of only 0.5247. The results suggest that the performance is very good for all models except the multinomial logistic regression/principal components analysis model. However, getting perfect prediction makes me a bit concerned that I may be overfitting the data. 
+```{r}
+confusionMatrix(pred_train_rf,training_final$classe)
+confusionMatrix(pred_train_gbm,training_final$classe)
+confusionMatrix(pred_train_pca,training_final$classe)
+confusionMatrix(pred_train_stack,training_final$classe)
+```
+
+Next, I evaluate the test data. The performance is still very good for the random forest (accuracy=0.9926) and the stacking model (0.9924). The performance is slightly lower for the gradient boosting model (0.959) and much worse for the multinomial logistic regression/principal components analysis (0.5185). As such, I conclude that the performance of the random forest, gradient boosting, and stacking is very high when applied out of the sample used to calculate the data. 
+```{r}
+confusionMatrix(pred_test_rf,testing_final$classe)
+confusionMatrix(pred_test_gbm,testing_final$classe)
+confusionMatrix(pred_test_pca,testing_final$classe)
+confusionMatrix(pred_test_stack,testing_final$classe)
+```
+
+I predict the results for the 20 test examples using the stacked model. I base this decision on the performance in the training data, which was equally good for both the random forest and the stacked model. I did not base this decision on how it performed on the test data above because that would mean I was using the test data to guide the modeling. 
+```{r}
+print(pred_test_20_stack)
+```
+
+#Variable importance
+I also evaluate the variable importance of the models. This information is helpful in understanding which predictors were most important in the predictions. For space consideration, I only plot the variable importance for random forests and the stacking model. 
+
+The variable imortance for the random forest plot shows that the most important variables are roll_belt, pitch_forearm, yaw_belt, pitch_belt, and magnet_dumbbell_z. The variable importance is low for the user_names, which suggests that there may not be important patterns for specific users.  
+```{r}
+plot(varImp(model_rf))
+```
+
+The variable importance for the stacked model shows how important each model was for the stacked model. We see that the predictions for the random forest were most important followed by the predictions for the gradient boosting model. However, the predictions for the multinomial logistic model/principal components model does not appear to contribute much to the stacked prediction. These results are consistent with our finding that the random forest had the best performance in terms of accuracy, followed closely by gradient boosting, and then last was the multinomial logistic model/principal components model with much worse performance. 
+```{r}
+plot(varImp(model_stack))
+```
+
+#Conclusion
+In summary, the final stacked model that consisted of a random forest, gradient boosting, and multinomial logistic model/principal components analysis performed very well with an estimated out-of-sample accuracy of 0.9924. The random forest and gradient boosting appeared to contribute the most in the stacked model and the multinomial logistic model/principal components analysis performed poorly. Analysis of the variable importance showed that there were a few predictors that were highly important including roll_belt, pitch_forearm, yaw_belt, pitch_belt, and magnet_dumbbell_z. 
